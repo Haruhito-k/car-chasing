@@ -1,0 +1,667 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>3D Tilt Racing</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; width: 100%; height: 100%;
+  overflow: hidden; background: #101820; color: white;
+  font-family: Arial, sans-serif; touch-action: manipulation;
+}
+#game { position: fixed; inset: 0; }
+canvas { display: block; width: 100%; height: 100%; }
+#hud {
+  position: fixed; top: 10px; left: 10px; right: 10px;
+  display: flex; justify-content: space-between; gap: 8px;
+  pointer-events: none; align-items: flex-start;
+}
+.panel {
+  background: #07111ddd; border: 1px solid #ffffff33;
+  border-radius: 10px; padding: 9px 12px;
+  font-size: 13px; line-height: 1.6;
+}
+#sensorPanel {
+  position: fixed; left: 10px; bottom: 10px;
+  width: min(310px, calc(100% - 20px));
+  background: #07111deF; border: 1px solid #ffffff40;
+  border-radius: 10px; padding: 10px; font-size: 12px;
+  line-height: 1.55; overflow-wrap: anywhere;
+}
+#sensorTitle { font-weight: bold; color: #55e8ff; }
+#sensorStatus { color: #ffd166; }
+#menu {
+  position: fixed; inset: 0; display: flex;
+  justify-content: center; align-items: center;
+  background: #06101acc; padding: 18px;
+}
+#menuCard {
+  width: min(460px, 100%); background: #111d2b;
+  border: 1px solid #4a718e; border-radius: 18px;
+  padding: 24px; text-align: center;
+  box-shadow: 0 10px 40px #0008;
+}
+h1 { margin: 0 0 10px; font-size: clamp(28px, 7vw, 44px); }
+p { line-height: 1.65; color: #d5e3ed; font-size: 14px; }
+button {
+  border: 0; border-radius: 10px; padding: 13px 18px;
+  font-size: 16px; font-weight: bold; cursor: pointer;
+  color: #06121a; background: #55e8ff;
+}
+button:active { transform: scale(.98); }
+#startBtn { width: 100%; margin-top: 8px; }
+#recalibrateBtn { padding: 8px 10px; font-size: 12px; margin-top: 6px; }
+#warning { color: #ffd166; font-size: 12px; }
+#touchControls {
+  position: fixed; bottom: 20px; right: 15px;
+  display: flex; gap: 10px; align-items: end;
+}
+.touchBtn {
+  width: 65px; height: 65px; border-radius: 50%;
+  background: #142b3dcc; color: white;
+  border: 2px solid #ffffff88; font-size: 12px;
+  touch-action: none;
+}
+#leftBtn, #rightBtn { width: 54px; height: 54px; }
+@media (orientation: portrait) {
+  #rotateHint { display: block; }
+}
+#rotateHint {
+  display: none; position: fixed; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4; background: #101820ee; padding: 10px;
+  border-radius: 8px; font-size: 12px; pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="game"></div>
+
+<div id="hud">
+  <div class="panel">
+    <strong>🏁 TILT RACING</strong><br>
+    速度：<span id="speed">0</span> km/h<br>
+    距離：<span id="distance">0</span> m
+  </div>
+  <div class="panel">
+    操作：スマホを傾ける<br>
+    <span id="driveStatus">スタート待ち</span>
+  </div>
+</div>
+
+<div id="sensorPanel">
+  <div id="sensorTitle">センサー診断</div>
+  状態：<span id="sensorStatus">未接続</span><br>
+  beta（前後）：<span id="betaValue">--</span>°<br>
+  gamma（左右）：<span id="gammaValue">--</span>°<br>
+  基準からの変化：前後 <span id="pitchDelta">--</span>° ／ 左右 <span id="rollDelta">--</span>°<br>
+  <span id="secureInfo"></span><br>
+  <button id="recalibrateBtn" type="button">今の角度を基準にする</button>
+</div>
+
+<div id="rotateHint">横向きでのプレイがおすすめです</div>
+
+<div id="menu">
+  <div id="menuCard">
+    <h1>3D TILT RACING</h1>
+    <p>
+      スマホの傾きで車を操作する3Dレースゲーム。<br>
+      <b>前に傾ける：</b>アクセル<br>
+      <b>手前に傾ける：</b>ブレーキ<br>
+      <b>左右に傾ける：</b>ハンドル<br><br>
+      スタート時はスマホをいつもの持ち方で静止させてください。
+      最初に取得した角度を基準にします。
+    </p>
+    <p id="warning">センサーの値が届かない場合は、画面左下の診断欄を確認してください。</p>
+    <button id="startBtn">レース開始・センサー接続</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+(() => {
+"use strict";
+
+const $ = id => document.getElementById(id);
+const statusEl = $("sensorStatus");
+const betaEl = $("betaValue");
+const gammaEl = $("gammaValue");
+const pitchEl = $("pitchDelta");
+const rollEl = $("rollDelta");
+
+$("secureInfo").textContent = location.protocol === "https:"
+  ? "HTTPS：OK"
+  : "注意：HTTPSではありません。GitHub PagesのURLで開いてください。";
+
+let scene, camera, renderer, car;
+let roadParts = [];
+let wheels = [];
+let running = false;
+let gameStarted = false;
+let lastTime = 0;
+
+let speed = 0;
+let distance = 0;
+let steering = 0;
+let lateral = 0;
+let roadCurve = 0;
+let carHeading = 0;
+
+let latestBeta = null;
+let latestGamma = null;
+let baseBeta = null;
+let baseGamma = null;
+let sensorEvents = 0;
+let sensorLastTime = 0;
+let sensorConnected = false;
+let calibrating = false;
+
+let accelTouch = false;
+let brakeTouch = false;
+let leftTouch = false;
+let rightTouch = false;
+
+// 端末によって前後の角度の符号が異なる場合があります。
+// 診断欄で値の変化を確認し、必要ならここを 1 または -1 に変更してください。
+const PITCH_SIGN = 1;
+const ROLL_SIGN = 1;
+
+const MAX_SPEED = 190;
+const ROAD_WIDTH = 14;
+
+function setStatus(text, color) {
+  statusEl.textContent = text;
+  if (color) statusEl.style.color = color;
+}
+
+function initScene() {
+  if (renderer) return;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x8ac7ed);
+  scene.fog = new THREE.Fog(0x8ac7ed, 90, 350);
+
+  camera = new THREE.PerspectiveCamera(
+    65, window.innerWidth / window.innerHeight, 0.1, 1000
+  );
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  $("game").appendChild(renderer.domElement);
+
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x435363, 2.0);
+  scene.add(hemi);
+
+  const sun = new THREE.DirectionalLight(0xffffff, 2.3);
+  sun.position.set(-35, 60, 25);
+  sun.castShadow = true;
+  scene.add(sun);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(2000, 2000),
+    new THREE.MeshStandardMaterial({ color: 0x39834c })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.15;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  createTrack();
+  createCar();
+
+  window.addEventListener("resize", onResize);
+  onResize();
+}
+
+function createTrack() {
+  // ループする道路を、カーブした中心線から生成
+  const points = [];
+  const count = 180;
+  const radiusX = 95;
+  const radiusZ = 145;
+
+  for (let i = 0; i < count; i++) {
+    const a = i / count * Math.PI * 2;
+    points.push(new THREE.Vector3(
+      Math.sin(a) * radiusX + Math.sin(a * 2) * 12,
+      0,
+      Math.cos(a) * radiusZ
+    ));
+  }
+
+  const curve = new THREE.CatmullRomCurve3(points, true, "catmullrom", 0.3);
+  const divisions = 900;
+  const verts = [];
+  const indices = [];
+  const colors = [];
+
+  for (let i = 0; i <= divisions; i++) {
+    const t = i / divisions;
+    const p = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t).normalize();
+    const side = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+    const left = p.clone().addScaledVector(side, ROAD_WIDTH / 2);
+    const right = p.clone().addScaledVector(side, -ROAD_WIDTH / 2);
+    left.y = right.y = 0.02;
+
+    verts.push(left.x, left.y, left.z, right.x, right.y, right.z);
+    const stripe = Math.floor(t * divisions / 6) % 2;
+    const c = stripe ? 0.23 : 0.27;
+    colors.push(c, c, c, c, c, c);
+
+    if (i < divisions) {
+      const n = i * 2;
+      indices.push(n, n + 1, n + 2, n + 1, n + 3, n + 2);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const road = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({
+      vertexColors: true, side: THREE.DoubleSide, roughness: 0.9
+    })
+  );
+  road.receiveShadow = true;
+  scene.add(road);
+
+  // 道路の両側に白い縁石を設置
+  const curbMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2 });
+  const redMat = new THREE.MeshStandardMaterial({ color: 0xe63c3c });
+
+  for (let i = 0; i < divisions; i += 4) {
+    const t = i / divisions;
+    const p = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t).normalize();
+    const side = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+    for (const sign of [-1, 1]) {
+      const curb = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2, 0.18, 2.1),
+        (Math.floor(i / 4) % 2 === 0) ? redMat : curbMat
+      );
+      curb.position.copy(p).addScaledVector(side, sign * (ROAD_WIDTH / 2 + 0.65));
+      curb.position.y = 0.08;
+      curb.rotation.y = Math.atan2(tangent.x, tangent.z);
+      scene.add(curb);
+    }
+  }
+
+  // 進行方向の目印
+  const start = curve.getPointAt(0);
+  const tangent = curve.getTangentAt(0);
+  const line = new THREE.Mesh(
+    new THREE.BoxGeometry(ROAD_WIDTH, 0.035, 1.3),
+    new THREE.MeshStandardMaterial({ color: 0xffffff })
+  );
+  line.position.set(start.x, 0.06, start.z);
+  line.rotation.y = Math.atan2(tangent.x, tangent.z);
+  scene.add(line);
+
+  // 背景の山
+  const mountainMat = new THREE.MeshStandardMaterial({ color: 0x78929b });
+  for (let i = 0; i < 45; i++) {
+    const a = i / 45 * Math.PI * 2;
+    const r = 210 + Math.random() * 45;
+    const h = 18 + Math.random() * 35;
+    const mountain = new THREE.Mesh(
+      new THREE.ConeGeometry(12 + Math.random() * 14, h, 6),
+      mountainMat
+    );
+    mountain.position.set(Math.cos(a) * r, h / 2 - 1, Math.sin(a) * r);
+    scene.add(mountain);
+  }
+
+  // カーブ中心線を保持して車の位置計算に使う
+  roadCurve = curve;
+}
+
+function createCar() {
+  car = new THREE.Group();
+
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0x12a9ef, metalness: 0.55, roughness: 0.28
+  });
+  const darkMat = new THREE.MeshStandardMaterial({
+    color: 0x101923, metalness: 0.25, roughness: 0.2
+  });
+  const glassMat = new THREE.MeshStandardMaterial({
+    color: 0x8dd9f4, metalness: 0.35, roughness: 0.15
+  });
+  const lightMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, emissive: 0xeeeeee
+  });
+  const tailMat = new THREE.MeshStandardMaterial({
+    color: 0xff2222, emissive: 0x880000
+  });
+
+  function part(geo, mat, x, y, z) {
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    car.add(mesh);
+    return mesh;
+  }
+
+  part(new THREE.BoxGeometry(2.1, 0.55, 4.2), bodyMat, 0, 0.65, 0);
+  part(new THREE.BoxGeometry(1.55, 0.65, 1.85), glassMat, 0, 1.18, -0.25);
+  part(new THREE.BoxGeometry(1.75, 0.16, 1.2), bodyMat, 0, 0.98, 1.35);
+  part(new THREE.BoxGeometry(1.9, 0.12, 0.45), darkMat, 0, 0.95, -1.95);
+  part(new THREE.BoxGeometry(1.95, 0.12, 0.45), bodyMat, 0, 1.0, -2.1);
+
+  for (const x of [-0.72, 0.72]) {
+    part(new THREE.BoxGeometry(0.32, 0.18, 0.12), lightMat, x, 0.72, 2.12);
+    part(new THREE.BoxGeometry(0.32, 0.18, 0.12), tailMat, x, 0.72, -2.12);
+  }
+
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x151515 });
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0xb9c4ca, metalness: 0.7 });
+
+  for (const x of [-1.05, 1.05]) {
+    for (const z of [-1.35, 1.35]) {
+      const wheel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.39, 0.39, 0.25, 20),
+        wheelMat
+      );
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(x, 0.4, z);
+      wheel.castShadow = true;
+      car.add(wheel);
+      wheels.push(wheel);
+
+      const rim = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.19, 0.19, 0.27, 12),
+        rimMat
+      );
+      rim.rotation.z = Math.PI / 2;
+      rim.position.set(x * 1.01, 0.4, z);
+      car.add(rim);
+    }
+  }
+
+  scene.add(car);
+}
+
+function onResize() {
+  if (!camera || !renderer) return;
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function updateDiagnostic() {
+  if (latestBeta === null || latestGamma === null) return;
+  betaEl.textContent = latestBeta.toFixed(1);
+  gammaEl.textContent = latestGamma.toFixed(1);
+
+  if (baseBeta !== null && baseGamma !== null) {
+    pitchEl.textContent = (latestBeta - baseBeta).toFixed(1);
+    rollEl.textContent = (latestGamma - baseGamma).toFixed(1);
+  }
+}
+
+function handleOrientation(event) {
+  if (typeof event.beta !== "number" ||
+      typeof event.gamma !== "number" ||
+      !Number.isFinite(event.beta) ||
+      !Number.isFinite(event.gamma)) {
+    setStatus("イベントは来るが値が無効", "#ff8d8d");
+    return;
+  }
+
+  latestBeta = event.beta;
+  latestGamma = event.gamma;
+  sensorEvents++;
+  sensorLastTime = performance.now();
+  sensorConnected = true;
+
+  // 重要：初回のイベントが届いた時点で基準値を設定する。
+  // センサー値が来る前に基準値を読もうとしない。
+  if (calibrating || baseBeta === null || baseGamma === null) {
+    baseBeta = latestBeta;
+    baseGamma = latestGamma;
+    calibrating = false;
+    setStatus("接続済み・基準設定完了", "#7dff9b");
+  } else {
+    setStatus("接続済み・値を受信中", "#7dff9b");
+  }
+
+  updateDiagnostic();
+}
+
+function calibrateNow() {
+  if (latestBeta === null || latestGamma === null) {
+    setStatus("まだセンサー値が届いていません", "#ff8d8d");
+    return;
+  }
+  baseBeta = latestBeta;
+  baseGamma = latestGamma;
+  calibrating = false;
+  updateDiagnostic();
+  setStatus("基準角度を更新しました", "#7dff9b");
+}
+
+$("recalibrateBtn").addEventListener("click", calibrateNow);
+
+async function connectSensorsFromButton() {
+  setStatus("センサー接続を準備中…", "#ffd166");
+
+  if (!window.isSecureContext) {
+    setStatus("HTTPSではありません", "#ff8d8d");
+    $("warning").textContent =
+      "HTTPSで開いてください。GitHub Pagesの https://...github.io/... を利用してください。";
+  }
+
+  if (!("DeviceOrientationEvent" in window)) {
+    setStatus("このブラウザで方向センサーAPIが使えません", "#ff8d8d");
+    return false;
+  }
+
+  // Android Chromeでは通常、requestPermission() が存在しないため、
+  // その場合は許可画面を待たずにイベントを登録する。
+  try {
+    if (typeof DeviceOrientationEvent.requestPermission === "function") {
+      const permission = await DeviceOrientationEvent.requestPermission();
+      if (permission !== "granted") {
+        setStatus("センサー許可が拒否されました", "#ff8d8d");
+        return false;
+      }
+    }
+  } catch (error) {
+    setStatus("許可確認エラー：" + error.message, "#ff8d8d");
+    return false;
+  }
+
+  // 二重登録を防ぎつつ、必ず基準値をリセットする。
+  window.removeEventListener("deviceorientation", handleOrientation);
+  latestBeta = null;
+  latestGamma = null;
+  baseBeta = null;
+  baseGamma = null;
+  sensorEvents = 0;
+  sensorConnected = false;
+  calibrating = true;
+
+  // 先にリスナーを登録し、最初の値が届いたときに基準角度を決める。
+  window.addEventListener("deviceorientation", handleOrientation, true);
+
+  setStatus("センサー値を待っています…", "#ffd166");
+
+  // 画面のステータスを更新して、値が来ない場合も診断できるようにする。
+  const waitStart = performance.now();
+  const check = () => {
+    if (sensorConnected) return;
+    if (performance.now() - waitStart > 4500) {
+      setStatus("4.5秒間データなし：HTTPS・Chrome設定を確認", "#ff8d8d");
+      $("warning").textContent =
+        "傾けても beta/gamma が -- のままなら、URLがHTTPSか、Chromeでセンサーが制限されていないか確認してください。";
+      return;
+    }
+    requestAnimationFrame(check);
+  };
+  requestAnimationFrame(check);
+  return true;
+}
+
+$("startBtn").addEventListener("click", async () => {
+  $("startBtn").disabled = true;
+  $("startBtn").textContent = "センサー接続中…";
+
+  initScene();
+  const ok = await connectSensorsFromButton();
+
+  gameStarted = true;
+  running = true;
+  $("menu").style.display = "none";
+  $("driveStatus").textContent = ok ? "センサー確認中" : "傾きセンサー未接続";
+  lastTime = performance.now();
+  requestAnimationFrame(animate);
+
+  $("startBtn").disabled = false;
+  $("startBtn").textContent = "レース開始・センサー接続";
+});
+
+function bindHold(id, setter) {
+  const el = $(id);
+  const down = e => { e.preventDefault(); setter(true); };
+  const up = e => { e.preventDefault(); setter(false); };
+  el.addEventListener("pointerdown", down);
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+  el.addEventListener("pointerleave", up);
+}
+
+bindHold("leftBtn", v => leftTouch = v);
+bindHold("rightBtn", v => rightTouch = v);
+bindHold("accelBtn", v => accelTouch = v);
+bindHold("brakeBtn", v => brakeTouch = v);
+
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft" || e.key.toLowerCase() === "a") leftTouch = true;
+  if (e.key === "ArrowRight" || e.key.toLowerCase() === "d") rightTouch = true;
+  if (e.key === "ArrowUp" || e.key.toLowerCase() === "w") accelTouch = true;
+  if (e.key === "ArrowDown" || e.key.toLowerCase() === "s") brakeTouch = true;
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft" || e.key.toLowerCase() === "a") leftTouch = false;
+  if (e.key === "ArrowRight" || e.key.toLowerCase() === "d") rightTouch = false;
+  if (e.key === "ArrowUp" || e.key.toLowerCase() === "w") accelTouch = false;
+  if (e.key === "ArrowDown" || e.key.toLowerCase() === "s") brakeTouch = false;
+});
+
+function animate(now) {
+  if (!running) return;
+  requestAnimationFrame(animate);
+
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  if (sensorConnected && now - sensorLastTime > 3000) {
+    setStatus("受信が停止しました", "#ff8d8d");
+  }
+
+  let pitch = 0;
+  let roll = 0;
+  if (latestBeta !== null && baseBeta !== null) {
+    pitch = (latestBeta - baseBeta) * PITCH_SIGN;
+  }
+  if (latestGamma !== null && baseGamma !== null) {
+    roll = (latestGamma - baseGamma) * ROLL_SIGN;
+  }
+
+  // 操作方向：前傾でアクセル、手前傾でブレーキ。
+  // 左右は端末の角度差でステアリング。
+  const tiltAccel = Math.max(0, Math.min(1, (pitch - 3) / 14));
+  const tiltBrake = Math.max(0, Math.min(1, (-pitch - 3) / 14));
+  const tiltSteer = Math.max(-1, Math.min(1, roll / 18));
+
+  const accelerating = tiltAccel > 0 || accelTouch;
+  const braking = tiltBrake > 0 || brakeTouch;
+  let steerInput = tiltSteer;
+
+  if (leftTouch) steerInput -= 1;
+  if (rightTouch) steerInput += 1;
+  steerInput = Math.max(-1, Math.min(1, steerInput));
+
+  steering += (steerInput - steering) * Math.min(1, dt * 5);
+
+  if (accelerating) speed += (accelerateAmount() * 40 + 8) * dt;
+  else speed -= 8 * dt;
+
+  if (braking) speed -= (55 + tiltBrake * 35) * dt;
+  speed = Math.max(0, Math.min(MAX_SPEED, speed));
+
+  function unused() {}
+  function accelerateAmount() {
+    return Math.max(tiltAccel, accelTouch ? 1 : 0);
+  }
+
+  distance += speed * dt / 3.6;
+  lateral += steering * (0.8 + speed / 85) * dt;
+  lateral = Math.max(-5.4, Math.min(5.4, lateral));
+
+  // 道路の中心線上を進み、ハンドル操作で道路横方向へ移動する。
+  const progress = (distance / 750) % 1;
+  const center = roadCurve.getPointAt(progress);
+  const tangent = roadCurve.getTangentAt(progress).normalize();
+  const side = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+  const carPos = center.clone().addScaledVector(side, lateral);
+  carPos.y = 0.1;
+  car.position.copy(carPos);
+  carHeading = Math.atan2(tangent.x, tangent.z);
+  car.rotation.y = carHeading + steering * 0.22;
+  car.rotation.z = -steering * 0.07;
+
+  for (const wheel of wheels) {
+    wheel.rotation.x += speed * dt * 0.015;
+  }
+
+  const behind = new THREE.Vector3(
+    -tangent.x * 9, 5.2, -tangent.z * 9
+  );
+  const camPos = carPos.clone().add(behind);
+  camera.position.lerp(camPos, Math.min(1, dt * 4));
+  const look = carPos.clone().addScaledVector(tangent, 8);
+  look.y += 1.1;
+  camera.lookAt(look);
+
+  $("speed").textContent = Math.round(speed);
+  $("distance").textContent = Math.floor(distance);
+  $("driveStatus").textContent =
+    sensorConnected ? "センサー接続済み" : "センサー確認中";
+
+  renderer.render(scene, camera);
+}
+
+// センサーが届かない場合でも、画面上で状況を確認できるようにする。
+window.addEventListener("deviceorientation", event => {
+  if (typeof event.beta === "number" && typeof event.gamma === "number") {
+    // 実際の処理は handleOrientation で行う。
+  }
+});
+
+})();
+</script>
+
+<div id="touchControls">
+  <button class="touchBtn" id="leftBtn" aria-label="左">◀</button>
+  <button class="touchBtn" id="rightBtn" aria-label="右">▶</button>
+  <button class="touchBtn" id="brakeBtn" aria-label="ブレーキ">ブレーキ</button>
+  <button class="touchBtn" id="accelBtn" aria-label="アクセル">アクセル</button>
+</div>
+</body>
+</html>
