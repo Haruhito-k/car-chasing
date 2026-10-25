@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Winding Road Racing</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#091018;font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;touch-action:none}canvas{display:block;width:100%;height:100%}#hud{position:fixed;inset:0;pointer-events:none;color:#fff;text-shadow:0 2px 5px #000a}.top{position:absolute;top:max(12px,env(safe-area-inset-top));left:12px;right:12px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}.panel{background:#07111bd9;border:1px solid #ffffff25;border-radius:12px;padding:9px 12px;backdrop-filter:blur(8px)}#speed{font-size:25px;font-weight:800;line-height:1.1}#speed small{font-size:11px;font-weight:600}#status{font-size:12px;margin-top:5px;color:#cce5f5}#sensor{font-size:11px;line-height:1.5;max-width:52%;text-align:right}#bottom{position:absolute;bottom:max(16px,env(safe-area-inset-bottom));left:12px;right:12px;display:flex;justify-content:center;gap:8px;align-items:center}button{pointer-events:auto;border:1px solid #ffffff35;border-radius:12px;background:#102638ed;color:#fff;padding:12px 16px;font-size:14px;font-weight:700;box-shadow:0 4px 14px #0005}button:active{transform:scale(.97)}#resetBtn{font-size:12px;padding:9px 12px}#overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:22px;background:linear-gradient(#06101dcc,#07121eee);color:white;z-index:5;text-align:center}#overlay.hidden{display:none}.card{width:min(440px,100%);border:1px solid #ffffff30;background:#0b1a28f5;border-radius:22px;padding:25px 22px;box-shadow:0 20px 60px #0008}.card h1{font-size:clamp(26px,7vw,38px);margin:0 0 8px}.card p{color:#d4e4f0;font-size:14px;line-height:1.75}.card button{background:#00a9e8;border:0;width:100%;margin-top:10px;padding:15px;font-size:16px}.note{font-size:11px!important;color:#9fb5c6!important}#landscape{display:none;position:fixed;inset:0;background:#08111c;color:white;z-index:10;align-items:center;justify-content:center;text-align:center;padding:24px;font-weight:700}
+@media (orientation:landscape){#landscape{display:flex}}
+</style>
+</head>
+<body>
+<div id="hud">
+ <div class="top">
+  <div class="panel"><div id="speed">0 <small>km/h</small></div><div id="status">スタート待機中</div></div>
+  <div class="panel" id="sensor">センサー: 待機中<br>端末を前後左右に傾けて操作</div>
+ </div>
+ <div id="bottom"><button id="resetBtn">位置をリセット</button></div>
+</div>
+<div id="overlay"><div class="card"><h1>🏁 Winding Road</h1><p>左右に曲がり続ける一本道を走ろう！<br>スマホを左右に傾けてハンドル操作。<br>手前に傾けるとアクセル、前に傾けるとブレーキ。<br>コース外に出るとスタート地点に戻ります。</p><button id="startBtn">レース開始</button><p class="note">センサーの許可が表示された場合は「許可」を選んでください。</p></div></div>
+<div id="landscape">このゲームは縦画面専用です。<br>スマートフォンを縦向きにしてください。</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id);
+const sensorEl=$('sensor'), speedEl=$('speed'), statusEl=$('status'), overlay=$('overlay');
+let scene,camera,renderer,car,carBody, wheels=[], roadMesh, roadEdges=[], scenery=[];
+let running=false, lastTime=0, speed=0, carZ=0, lateral=0, headingOffset=0;
+let pitch=0, roll=0, baseBeta=null, baseGamma=null, sensorReady=false;
+const ROAD_WIDTH=24;                 // コースを太く
+const HALF_ROAD=ROAD_WIDTH/2;
+const STEER_SENSITIVITY=0.78;       // 左右感度を下げる
+const MAX_SPEED=76;
+const ROAD_LENGTH=3600;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const roadX=z=>Math.sin(z*.006)*42+Math.sin(z*.014+1.1)*17+Math.sin(z*.0028)*24;
+const roadSlope=z=>(roadX(z+1)-roadX(z-1))/2;
+function init(){
+ scene=new THREE.Scene();scene.background=new THREE.Color(0x8fc7e8);scene.fog=new THREE.Fog(0x8fc7e8,170,900);
+ camera=new THREE.PerspectiveCamera(66,innerWidth/innerHeight,.1,1800);
+ renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});renderer.setPixelRatio(Math.min(devicePixelRatio,1.8));renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;document.body.appendChild(renderer.domElement);
+ scene.add(new THREE.HemisphereLight(0xe7f7ff,0x48613a,2.0));const sun=new THREE.DirectionalLight(0xfff0d7,2.5);sun.position.set(-80,130,40);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);sun.shadow.camera.left=-100;sun.shadow.camera.right=100;sun.shadow.camera.top=130;sun.shadow.camera.bottom=-130;scene.add(sun);
+ const ground=new THREE.Mesh(new THREE.PlaneGeometry(6000,6000),new THREE.MeshStandardMaterial({color:0x467d46,roughness:1}));ground.rotation.x=-Math.PI/2;ground.position.y=-.18;ground.receiveShadow=true;scene.add(ground);
+ buildRoad();buildCar();buildScenery();
+ window.addEventListener('resize',onResize);window.addEventListener('deviceorientation',onOrientation,true);
+ $('startBtn').addEventListener('click',startGame);$('resetBtn').addEventListener('click',resetToStart);
+ animate(0);
+}
+function buildRoad(){
+ const pts=[];for(let z=180;z>=-ROAD_LENGTH;z-=16)pts.push(new THREE.Vector3(roadX(z),0,z));
+ const curve=new THREE.CatmullRomCurve3(pts);const divisions= Math.ceil(ROAD_LENGTH/5), verts=[],uv=[],indices=[];
+ for(let i=0;i<=divisions;i++){const t=i/divisions,p=curve.getPointAt(t),tan=curve.getTangentAt(t),side=new THREE.Vector3(-tan.z,0,tan.x).normalize();for(const s of [-HALF_ROAD,HALF_ROAD]){verts.push(p.x+side.x*s,.02,p.z+side.z*s);uv.push(i/divisions*80,(s+HALF_ROAD)/ROAD_WIDTH)}if(i<divisions){let a=i*2;indices.push(a,a+1,a+2,a+1,a+3,a+2)}}
+ const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.setIndex(indices);geo.computeVertexNormals();roadMesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0x30343b,roughness:.95,side:THREE.DoubleSide}));roadMesh.receiveShadow=true;scene.add(roadMesh);
+ // 明るい路肩ライン
+ for(const side of [-1,1]){const linePts=[];for(let z=180;z>=-ROAD_LENGTH;z-=8){const slope=roadSlope(z),norm=Math.sqrt(1+slope*slope);linePts.push(new THREE.Vector3(roadX(z)+side*(HALF_ROAD-.45)/norm,.08,z));}const line=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(linePts),linePts.length*2,.22,5,false),new THREE.MeshStandardMaterial({color:0xf4f5f0,roughness:.7}));scene.add(line);roadEdges.push(line)}
+ // 点線のセンターライン
+ for(let z=150;z>-ROAD_LENGTH;z-=34){const dash=new THREE.Mesh(new THREE.BoxGeometry(.28,.045,13),new THREE.MeshStandardMaterial({color:0xf4e6a4,emissive:0x29200b}));dash.position.set(roadX(z),.075,z);dash.rotation.y=-Math.atan(roadSlope(z));scene.add(dash);roadEdges.push(dash)}
+}
+function buildCar(){
+ car=new THREE.Group();
+ const red=new THREE.MeshStandardMaterial({color:0xd91f35,metalness:.45,roughness:.3});const dark=new THREE.MeshStandardMaterial({color:0x151b23,metalness:.25,roughness:.35});const glass=new THREE.MeshStandardMaterial({color:0x7fc6e8,metalness:.35,roughness:.18});
+ const base=new THREE.Mesh(new THREE.BoxGeometry(2.15,.52,4.25),red);base.position.y=.7;base.castShadow=true;car.add(base);
+ const hood=new THREE.Mesh(new THREE.BoxGeometry(1.85,.2,1.25),red);hood.position.set(0,.98,-1.15);hood.castShadow=true;car.add(hood);
+ const cabin=new THREE.Mesh(new THREE.BoxGeometry(1.55,.72,1.65),glass);cabin.position.set(0,1.23,.15);cabin.castShadow=true;car.add(cabin);
+ const roof=new THREE.Mesh(new THREE.BoxGeometry(1.35,.12,1.2),dark);roof.position.set(0,1.62,.15);car.add(roof);
+ for(const x of [-1,1])for(const z of [-1.35,1.35]){const w=new THREE.Mesh(new THREE.CylinderGeometry(.38,.38,.24,16),dark);w.rotation.z=Math.PI/2;w.position.set(x*1.08,.43,z);w.castShadow=true;car.add(w);wheels.push(w)}
+ for(const x of [-.67,.67]){const light=new THREE.Mesh(new THREE.BoxGeometry(.36,.13,.08),new THREE.MeshStandardMaterial({color:0xfff1c2,emissive:0x887744}));light.position.set(x,.78,-2.14);car.add(light)}
+ scene.add(car);car.position.set(roadX(0),0,0);
+}
+function buildScenery(){
+ const treeMat=new THREE.MeshStandardMaterial({color:0x27613a,roughness:1}),trunkMat=new THREE.MeshStandardMaterial({color:0x6a4930});
+ for(let z=140;z>-ROAD_LENGTH;z-=28){for(const side of [-1,1]){const x=roadX(z)+side*(HALF_ROAD+12+Math.random()*30);const h=5+Math.random()*10;const trunk=new THREE.Mesh(new THREE.CylinderGeometry(.35,.55,h*.35,6),trunkMat);trunk.position.set(x,h*.175,z);scene.add(trunk);const crown=new THREE.Mesh(new THREE.ConeGeometry(2+Math.random()*1.5,h,7),treeMat);crown.position.set(x,h*.55,z);crown.castShadow=true;scene.add(crown);scenery.push(trunk,crown)}}
+ // 遠くの山並み
+ const mountainMat=new THREE.MeshStandardMaterial({color:0x789c9b,roughness:1});for(let i=0;i<32;i++){const h=35+Math.random()*65,r=35+Math.random()*40;const m=new THREE.Mesh(new THREE.ConeGeometry(r,h,5),mountainMat);m.position.set((i-16)*85,h/2-2,-450-Math.random()*150);scene.add(m)}
+}
+function onOrientation(e){if(e.beta==null||e.gamma==null)return;if(baseBeta===null){baseBeta=e.beta;baseGamma=e.gamma}pitch=clamp(e.beta-baseBeta,-45,45);roll=clamp(e.gamma-baseGamma,-45,45);sensorReady=true;sensorEl.innerHTML=`センサー: <b>${sensorReady?'接続中':'待機中'}</b><br>左右 ${roll.toFixed(1)}°　前後 ${pitch.toFixed(1)}°`}
+async function startGame(){
+ try{if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){const p=await DeviceOrientationEvent.requestPermission();if(p!=='granted')sensorEl.textContent='センサー許可なし';}}catch(e){sensorEl.textContent='センサー利用不可'}
+ baseBeta=null;baseGamma=null;running=true;overlay.classList.add('hidden');lastTime=performance.now();statusEl.textContent='走行中';
+}
+function resetToStart(){speed=0;carZ=0;lateral=0;headingOffset=0;car.position.set(roadX(0),0,0);car.rotation.y=-Math.atan(roadSlope(0));statusEl.textContent='スタート地点に戻りました'}
+function update(dt){
+ if(!running)return;
+ const accel=clamp((-pitch-3)/12,0,1),brake=clamp((pitch-3)/12,0,1);
+ if(accel>0)speed+=accel*40*dt;else speed-=10*dt;
+ speed-=brake*65*dt;speed=clamp(speed,0,MAX_SPEED);
+ // コースの曲がりに沿って前進し、左右入力は道路に対する横移動として加える
+ carZ-=speed*dt*.9;
+ const steer=clamp(roll/22,-1,1)*STEER_SENSITIVITY;
+ lateral+=steer*(5+speed*.15)*dt;
+ const center=roadX(carZ),slope=roadSlope(carZ),norm=Math.sqrt(1+slope*slope);
+ car.position.x=center+lateral/norm;car.position.z=carZ;car.position.y=0;
+ const roadHeading=-Math.atan(slope);car.rotation.y=roadHeading+steer*.13;
+ // コース外に出たら自動でスタート地点へ戻す
+ if(Math.abs(lateral)>HALF_ROAD-1.25){resetToStart();statusEl.textContent='コース外！ スタートに戻りました';}
+ // カメラは常に車の後方から追従し、道路の曲がりに合わせて向く
+ const behind=new THREE.Vector3(Math.sin(car.rotation.y)*10,6.0,Math.cos(car.rotation.y)*10);
+ const desired=car.position.clone().add(behind);desired.y=6.0;
+ camera.position.lerp(desired,1-Math.exp(-4.2*dt));
+ const lookAt=car.position.clone();lookAt.y=1.0;lookAt.z-=Math.cos(car.rotation.y)*13;lookAt.x-=Math.sin(car.rotation.y)*13;camera.lookAt(lookAt);
+ speedEl.innerHTML=`${Math.round(speed*2.15)} <small>km/h</small>`;
+ if(Math.abs(lateral)<HALF_ROAD-3)statusEl.textContent=brake>.1?'ブレーキ中':accel>.1?'アクセル中':'走行中';
+}
+function animate(now){requestAnimationFrame(animate);const dt=Math.min((now-(lastTime||now))/1000,.04);lastTime=now;update(dt);renderer.render(scene,camera)}
+function onResize(){if(!camera||!renderer)return;camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)}
+init();
+})();
+</script>
+</body>
+</html>
